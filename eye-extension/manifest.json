@@ -3,7 +3,7 @@
   "name": "Shrimp Gaze Debug Tool",
   "version": "0.2.0",
   "description": "Fetch gaze coordinates from local API and render spotlight/debug overlay.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "tabs"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

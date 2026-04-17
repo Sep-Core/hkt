@@ -18,6 +18,7 @@ SEND_INTERVAL_SECONDS = 0.03
 COORD_FORMAT = os.getenv("EYE_COORD_FORMAT", "object").lower()
 COORD_WIDTH = int(os.getenv("EYE_COORD_WIDTH", "1920"))
 COORD_HEIGHT = int(os.getenv("EYE_COORD_HEIGHT", "1080"))
+FLIP_X = os.getenv("EYE_FLIP_X", "1").lower() not in {"0", "false", "no", "off"}
 MODEL_URL = (
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
   "face_landmarker/float16/latest/face_landmarker.task"
@@ -162,6 +163,8 @@ class GazeTracker:
 
     x = (left_x_ratio + right_x_ratio) / 2.0
     y = (left_y_ratio + right_y_ratio) / 2.0
+    if FLIP_X:
+      x = 1.0 - x
 
     alpha = 0.25
     smoothed_x = self.latest["x"] * (1 - alpha) + x * alpha
@@ -276,6 +279,7 @@ def main():
   print(f"[eye-server] http://{HOST}:{PORT}{ENDPOINT} started")
   print("[eye-server] coordinate formats: object | nested | array | text")
   print("[eye-server] set default format via EYE_COORD_FORMAT")
+  print(f"[eye-server] horizontal flip: {'on' if FLIP_X else 'off'} (EYE_FLIP_X)")
 
   try:
     server.serve_forever()

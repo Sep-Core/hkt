@@ -51,6 +51,20 @@ set EYE_COORD_FORMAT=nested
 python eye_server.py
 ```
 
+如果你发现左右方向反了（看右边时高亮往左走），可切换水平翻转：
+
+```powershell
+set EYE_FLIP_X=1
+python eye_server.py
+```
+
+关闭翻转：
+
+```powershell
+set EYE_FLIP_X=0
+python eye_server.py
+```
+
 ## 4) 坐标基准说明（插件）
 
 插件支持三种坐标基准：
@@ -64,7 +78,18 @@ python eye_server.py
 - 优先使用当前鼠标位置
 - 还没有鼠标记录时用屏幕中心
 
-## 5) 注意事项
+## 5) 注视校准（推荐）
+
+如果你感觉方向或偏移不准，可以做一次校准：
+
+1. 打开任意普通网页并保持页面可见
+2. 点击扩展弹窗里的 `Start Calibration`
+3. 页面会依次出现 5 个蓝色点，请每个点都盯住约 1 秒
+4. 完成后会自动保存校准参数
+
+重置校准可点 `Reset Calibration`。
+
+## 6) 注意事项
 
 - 这是演示级估算，未做标定，精度有限。
 - 需要摄像头权限与稳定光照。
