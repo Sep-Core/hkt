@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Python Gaze Demo</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 12px;
+        width: 280px;
+      }
+      .status {
+        margin-bottom: 10px;
+      }
+      code {
+        background: #f3f3f3;
+        padding: 2px 4px;
+        border-radius: 4px;
+      }
+      button {
+        width: 100%;
+        padding: 8px;
+        border: 0;
+        border-radius: 6px;
+        background: #d32f2f;
+        color: #fff;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="status">Status: <strong id="state">unknown</strong></div>
+    <div style="margin-bottom: 10px">Server: <code id="server-url">ws://127.0.0.1:8765</code></div>
+    <button id="reconnect-btn">Reconnect</button>
+    <script src="popup.js"></script>
+  </body>
+</html>
