@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import os
 import threading
 import time
@@ -32,6 +33,7 @@ MODEL_URL = (
   "face_landmarker/float16/latest/face_landmarker.task"
 )
 MODEL_PATH = Path(__file__).parent / "models" / "face_landmarker.task"
+WEBUI_DIR = Path(__file__).parent / "webui"
 
 LEFT_UPPER_LID_INDICES = [159, 160, 161, 246]
 LEFT_LOWER_LID_INDICES = [145, 144, 163, 7]
@@ -71,36 +73,98 @@ def solve_3x3(matrix, vector):
 
 
 def fit_affine(samples):
-  if not samples or len(samples) < 3:
+  if not samples or len(samples) < 5:
     return None
-  ata = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-  atbx = [0.0, 0.0, 0.0]
-  atby = [0.0, 0.0, 0.0]
+
+  validated = []
   for pair in samples:
     raw = pair.get("raw", {})
     target = pair.get("target", {})
     if not isinstance(raw.get("x"), (int, float)) or not isinstance(raw.get("y"), (int, float)):
-      return None
+      continue
     if not isinstance(target.get("x"), (int, float)) or not isinstance(target.get("y"), (int, float)):
-      return None
-    row = [float(raw["x"]), float(raw["y"]), 1.0]
-    for i in range(3):
-      for j in range(3):
-        ata[i][j] += row[i] * row[j]
-      atbx[i] += row[i] * float(target["x"])
-      atby[i] += row[i] * float(target["y"])
-  x_coeffs = solve_3x3(ata, atbx)
-  y_coeffs = solve_3x3(ata, atby)
-  if not x_coeffs or not y_coeffs:
+      continue
+    validated.append(
+      {
+        "raw": {"x": float(raw["x"]), "y": float(raw["y"])},
+        "target": {"x": float(target["x"]), "y": float(target["y"])},
+      }
+    )
+
+  if len(validated) < 5:
     return None
-  return {
-    "ax": x_coeffs[0],
-    "bx": x_coeffs[1],
-    "cx": x_coeffs[2],
-    "ay": y_coeffs[0],
-    "by": y_coeffs[1],
-    "cy": y_coeffs[2],
-  }
+
+  def solve(pairs):
+    ata = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    atbx = [0.0, 0.0, 0.0]
+    atby = [0.0, 0.0, 0.0]
+    for item in pairs:
+      row = [item["raw"]["x"], item["raw"]["y"], 1.0]
+      for i in range(3):
+        for j in range(3):
+          ata[i][j] += row[i] * row[j]
+        atbx[i] += row[i] * item["target"]["x"]
+        atby[i] += row[i] * item["target"]["y"]
+    x_coeffs = solve_3x3(ata, atbx)
+    y_coeffs = solve_3x3(ata, atby)
+    if not x_coeffs or not y_coeffs:
+      return None
+    return {
+      "ax": x_coeffs[0],
+      "bx": x_coeffs[1],
+      "cx": x_coeffs[2],
+      "ay": y_coeffs[0],
+      "by": y_coeffs[1],
+      "cy": y_coeffs[2],
+    }
+
+  def residual(affine, item):
+    rx = item["raw"]["x"]
+    ry = item["raw"]["y"]
+    tx = item["target"]["x"]
+    ty = item["target"]["y"]
+    px = affine["ax"] * rx + affine["bx"] * ry + affine["cx"]
+    py = affine["ay"] * rx + affine["by"] * ry + affine["cy"]
+    return math.sqrt((px - tx) ** 2 + (py - ty) ** 2)
+
+  affine = solve(validated)
+  if not affine:
+    return None
+
+  # Robust re-fit: drop extreme samples by residual and solve again.
+  residuals = [residual(affine, item) for item in validated]
+  sorted_r = sorted(residuals)
+  median_r = sorted_r[len(sorted_r) // 2]
+  threshold = max(24.0, median_r * 2.5)
+  filtered = [item for item, r in zip(validated, residuals) if r <= threshold]
+
+  if len(filtered) >= 5:
+    refined = solve(filtered)
+    if refined:
+      return refined
+
+  return affine
+
+
+class ScreenConfig:
+  def __init__(self) -> None:
+    self._lock = threading.Lock()
+    self._state = {
+      "width": COORD_WIDTH,
+      "height": COORD_HEIGHT,
+      "updated_at_ms": now_ms(),
+    }
+
+  def get(self) -> dict:
+    with self._lock:
+      return dict(self._state)
+
+  def set(self, width: int, height: int) -> dict:
+    with self._lock:
+      w = max(320, min(16384, int(width)))
+      h = max(200, min(16384, int(height)))
+      self._state = {"width": w, "height": h, "updated_at_ms": now_ms()}
+      return dict(self._state)
 
 
 class CalibrationStore:
@@ -142,15 +206,15 @@ class CalibrationStore:
         "sample_count": self._state["sample_count"],
       }
 
-  def apply(self, x: float, y: float):
+  def apply(self, x: float, y: float, width: int, height: int):
     state = self.get()
     if not state["enabled"] or not state["affine"]:
       return x, y, False
     a = state["affine"]
     mapped_x = a["ax"] * x + a["bx"] * y + a["cx"]
     mapped_y = a["ay"] * x + a["by"] * y + a["cy"]
-    mapped_x = max(0.0, min(float(COORD_WIDTH), mapped_x))
-    mapped_y = max(0.0, min(float(COORD_HEIGHT), mapped_y))
+    mapped_x = max(0.0, min(float(width), mapped_x))
+    mapped_y = max(0.0, min(float(height), mapped_y))
     return mapped_x, mapped_y, True
 
 
@@ -487,7 +551,16 @@ def build_payload(mapped: dict, response_format: str):
   return {"x": x, "y": y}
 
 
-def build_debug_payload(raw: dict, mapped: dict, calib: dict, selected_format: str, query: dict, request_path: str):
+def build_debug_payload(
+  raw: dict,
+  mapped: dict,
+  calib: dict,
+  selected_format: str,
+  query: dict,
+  request_path: str,
+  screen_width: int,
+  screen_height: int,
+):
   ts = now_ms()
   age_ms = max(0, ts - int(raw.get("last_update_ms", ts)))
   return {
@@ -508,8 +581,8 @@ def build_debug_payload(raw: dict, mapped: dict, calib: dict, selected_format: s
       "host": HOST,
       "port": PORT,
       "endpoint": ENDPOINT,
-      "coord_width": COORD_WIDTH,
-      "coord_height": COORD_HEIGHT,
+      "coord_width": screen_width,
+      "coord_height": screen_height,
       "flip_x": FLIP_X,
       "default_format": COORD_FORMAT,
     },
@@ -528,8 +601,33 @@ def build_debug_payload(raw: dict, mapped: dict, calib: dict, selected_format: s
   }
 
 
-def make_handler(store: CoordinateStore, calibration_store: CalibrationStore):
+def make_handler(store: CoordinateStore, calibration_store: CalibrationStore, screen_config: ScreenConfig):
   class CoordinateHandler(BaseHTTPRequestHandler):
+    def _serve_static_file(self, path: Path):
+      if not path.exists() or not path.is_file():
+        self._write_json({"ok": False, "error": "not-found"}, status=404)
+        return
+      body = path.read_bytes()
+      content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+      self.send_response(200)
+      self._set_common_headers(content_type, len(body))
+      self.end_headers()
+      self.wfile.write(body)
+
+    def _raw_from_norm(self, coord: dict, width: int, height: int):
+      x_norm = max(0.0, min(1.0, float(coord.get("x_norm", 0.5))))
+      y_norm = max(0.0, min(1.0, float(coord.get("y_norm", 0.5))))
+      return {
+        "x": int(round(x_norm * width)),
+        "y": int(round(y_norm * height)),
+        "x_norm": x_norm,
+        "y_norm": y_norm,
+        "confidence": float(coord.get("confidence", 0.0)),
+        "backend": coord.get("backend", "unknown"),
+        "last_update_ms": int(coord.get("last_update_ms", now_ms())),
+        "sequence": int(coord.get("sequence", 0)),
+      }
+
     def _set_common_headers(self, content_type: str, content_length: int):
       self.send_header("Content-Type", content_type)
       self.send_header("Access-Control-Allow-Origin", "*")
@@ -572,8 +670,22 @@ def make_handler(store: CoordinateStore, calibration_store: CalibrationStore):
 
     def do_GET(self):
       parsed = urlparse(self.path)
+      if parsed.path in {"/", "/index.html"}:
+        self._serve_static_file(WEBUI_DIR / "index.html")
+        return
+      if parsed.path.startswith("/webui/"):
+        rel = parsed.path[len("/webui/"):]
+        safe_rel = Path(rel)
+        if ".." in safe_rel.parts:
+          self._write_json({"ok": False, "error": "not-found"}, status=404)
+          return
+        self._serve_static_file(WEBUI_DIR / safe_rel)
+        return
       if parsed.path == "/health":
         self._write_json({"ok": True})
+        return
+      if parsed.path == "/screen":
+        self._write_json({"ok": True, "screen": screen_config.get()})
         return
       if parsed.path == "/calibration":
         self._write_json({"ok": True, "calibration": calibration_store.get()})
@@ -590,14 +702,24 @@ def make_handler(store: CoordinateStore, calibration_store: CalibrationStore):
         or query.get("verbose", ["0"])[0].lower() in {"1", "true", "yes", "on"}
       )
 
-      raw = store.get()
-      mapped_x, mapped_y, calibrated = calibration_store.apply(raw["x"], raw["y"])
+      screen = screen_config.get()
+      raw = self._raw_from_norm(store.get(), screen["width"], screen["height"])
+      mapped_x, mapped_y, calibrated = calibration_store.apply(raw["x"], raw["y"], screen["width"], screen["height"])
       mapped = {"x": int(round(mapped_x)), "y": int(round(mapped_y))}
       calib = calibration_store.get()
       calib["applied"] = calibrated
 
       if debug_mode:
-        payload = build_debug_payload(raw, mapped, calib, response_format, query, parsed.path)
+        payload = build_debug_payload(
+          raw,
+          mapped,
+          calib,
+          response_format,
+          query,
+          parsed.path,
+          screen["width"],
+          screen["height"],
+        )
         self._write_json(payload)
         return
 
@@ -609,6 +731,19 @@ def make_handler(store: CoordinateStore, calibration_store: CalibrationStore):
 
     def do_POST(self):
       parsed = urlparse(self.path)
+      if parsed.path == "/screen":
+        body = self._read_json_body()
+        if body is None:
+          self._write_json({"ok": False, "error": "invalid-json"}, status=400)
+          return
+        width = body.get("width")
+        height = body.get("height")
+        if not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+          self._write_json({"ok": False, "error": "invalid-screen-size"}, status=400)
+          return
+        state = screen_config.set(int(width), int(height))
+        self._write_json({"ok": True, "screen": state})
+        return
       if parsed.path == "/calibration/reset":
         state = calibration_store.clear()
         self._write_json({"ok": True, "calibration": state})
@@ -679,6 +814,7 @@ def main():
 
   store = CoordinateStore()
   calibration_store = CalibrationStore()
+  screen_config = ScreenConfig()
   stop_event = threading.Event()
 
   tracking_thread = threading.Thread(
@@ -686,11 +822,13 @@ def main():
   )
   tracking_thread.start()
 
-  handler_cls = make_handler(store, calibration_store)
+  handler_cls = make_handler(store, calibration_store, screen_config)
   server = ThreadingHTTPServer((HOST, PORT), handler_cls)
   print(f"[eye-server] http://{HOST}:{PORT}{ENDPOINT} started")
+  print(f"[eye-server] web UI: http://{HOST}:{PORT}/")
   print("[eye-server] formats: object | nested | array | text | debug")
   print("[eye-server] calibration APIs: GET/POST /calibration, POST /calibration/reset")
+  print("[eye-server] screen APIs: GET/POST /screen")
   print(f"[eye-server] horizontal flip: {'on' if FLIP_X else 'off'} (EYE_FLIP_X)")
   print(
     f"[eye-server] vertical tuning: gain={EYE_VERTICAL_GAIN}, "
