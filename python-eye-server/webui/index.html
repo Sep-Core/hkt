@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Eye Calibration WebUI</title>
+    <link rel="stylesheet" href="/webui/style.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-shape-a"></div>
+    <div class="bg-shape bg-shape-b"></div>
+
+    <main class="panel">
+      <h1>Eye Calibration WebUI</h1>
+      <p class="subtitle">纯 Web 校准与实时屏幕坐标，不依赖浏览器扩展。</p>
+
+      <section class="controls">
+        <button id="sync-screen-btn" type="button">同步屏幕尺寸</button>
+        <button id="start-calibration-btn" type="button" class="primary">开始校准</button>
+        <button id="reset-calibration-btn" type="button">重置校准</button>
+      </section>
+
+      <section class="stats">
+        <div class="stat-item"><span>屏幕尺寸</span><strong id="screen-size">-</strong></div>
+        <div class="stat-item"><span>Raw 屏幕坐标</span><strong id="raw-point">-</strong></div>
+        <div class="stat-item"><span>Mapped 屏幕坐标</span><strong id="mapped-point">-</strong></div>
+        <div class="stat-item"><span>Viewport 坐标</span><strong id="viewport-point">-</strong></div>
+        <div class="stat-item"><span>置信度</span><strong id="confidence">-</strong></div>
+        <div class="stat-item"><span>校准状态</span><strong id="calibration-state">-</strong></div>
+      </section>
+
+      <p id="status" class="status">准备就绪</p>
+      <p class="hint">校准时请保持头部稳定，依次盯住每个蓝色目标点，直到提示进入下一个点。</p>
+    </main>
+
+    <div id="gaze-dot" aria-hidden="true"></div>
+    <div id="calibration-dot" aria-hidden="true"></div>
+
+    <script src="/webui/app.js"></script>
+  </body>
+</html>

@@ -5,8 +5,10 @@
 ## Base URL
 
 - 默认：`http://127.0.0.1:3000`
+- WebUI：`GET /`
 - 坐标接口：`GET /coordinate`
 - 健康检查：`GET /health`
+- 屏幕配置：`GET /screen` / `POST /screen`
 - 校准状态：`GET /calibration`
 - 提交校准：`POST /calibration`
 - 重置校准：`POST /calibration/reset`
@@ -70,7 +72,8 @@
 320,240
 ```
 
-> 说明：当前后端输出的是像素坐标（基于 `EYE_COORD_WIDTH` / `EYE_COORD_HEIGHT` 映射）。
+> 说明：后端输出的是像素坐标。默认使用 `EYE_COORD_WIDTH` / `EYE_COORD_HEIGHT`，
+> WebUI 会通过 `/screen` 将其同步为当前屏幕尺寸。
 > 当后端校准启用时，这里返回的是 **mapped 坐标**（不是原始 raw 坐标）。
 
 ### 全量调试响应（推荐联调用）
@@ -101,10 +104,16 @@
   },
   "calibration": {
     "enabled": true,
+    "model_type": "quadratic",
     "applied": true,
     "updated_at_ms": 1776500000000,
     "sample_count": 5,
-    "affine": {"ax": 1.02, "bx": 0.01, "cx": -22.3, "ay": -0.02, "by": 0.98, "cy": 17.8}
+    "affine": null,
+    "quadratic": {
+      "x": [1.01, 0.02, -0.0001, 0.0, 0.0, -14.3],
+      "y": [0.01, 0.99, 0.0002, 0.0, 0.0, 11.8],
+      "basis": ["x", "y", "xy", "xx", "yy", "1"]
+    }
   },
   "server": {
     "host": "127.0.0.1",
@@ -112,6 +121,8 @@
     "endpoint": "/coordinate",
     "coord_width": 1920,
     "coord_height": 1080,
+    "viewport_origin_x": 120,
+    "viewport_origin_y": 88,
     "flip_x": true,
     "default_format": "object"
   },
@@ -145,9 +156,15 @@
   "ok": true,
   "calibration": {
     "enabled": true,
+    "model_type": "quadratic",
     "updated_at_ms": 1776500000000,
     "sample_count": 5,
-    "affine": {"ax": 1.02, "bx": 0.01, "cx": -22.3, "ay": -0.02, "by": 0.98, "cy": 17.8}
+    "affine": null,
+    "quadratic": {
+      "x": [1.01, 0.02, -0.0001, 0.0, 0.0, -14.3],
+      "y": [0.01, 0.99, 0.0002, 0.0, 0.0, 11.8],
+      "basis": ["x", "y", "xy", "xx", "yy", "1"]
+    }
   }
 }
 ```
@@ -168,6 +185,8 @@
 
 后端会计算仿射矩阵并在后续 `/coordinate` 中应用映射。
 
+> 当前后端使用鲁棒拟合：先做最小二乘，再按残差剔除离群点后二次拟合。
+
 ### 直接提交仿射矩阵
 
 `POST /calibration`
@@ -185,31 +204,39 @@
 
 ---
 
-## 4) 调试面板字段（前端插件显示）
+## 4) 屏幕配置 API
 
-页面右下角 debug panel 中主要字段：
+### 获取当前屏幕映射尺寸
 
-- `source`
-  - `api`: 来自坐标接口
-  - `calibration`: 校准流程采样中
-  - `request-error`: 请求失败回退中
-  - `config`: 配置缺失（如 URL 未设置）
-- `basis`
-  - 当前坐标基准解释模式：`auto|viewport|document`
-- `pollMs`
-  - 前端轮询间隔（毫秒）
-- `latencyMs`
-  - 本次接口请求耗时（毫秒）
-- `fallback`
-  - `none|mouse|center|center-no-url`
-- `raw API`
-  - 接口原始坐标（通常来自 API 的 `coordinate`）
-- `viewport`
-  - 按 `basis` 换算到当前视口后的坐标
-- `mapped`
-  - 后端返回的映射后坐标（高亮实际使用）
-- `calibration(backend)`
-  - 后端校准是否启用
+`GET /screen`
+
+```json
+{
+  "ok": true,
+  "screen": {
+    "width": 2560,
+    "height": 1440,
+    "viewport_origin_x": 120,
+    "viewport_origin_y": 88,
+    "updated_at_ms": 1776500000000
+  }
+}
+```
+
+### 更新屏幕映射尺寸
+
+`POST /screen`
+
+```json
+{
+  "width": 2560,
+  "height": 1440,
+  "viewport_origin_x": 120,
+  "viewport_origin_y": 88
+}
+```
+
+更新后，`/coordinate` 的 raw/mapped 坐标会按新的屏幕尺寸输出。
 
 ---
 
@@ -226,6 +253,10 @@
 - `EYE_X_SMOOTHING`：X 轴平滑系数，默认 `0.25`
 - `EYE_Y_SMOOTHING`：Y 轴平滑系数，默认 `0.35`
 - `EYE_SIZE_COMPENSATION`：按眼睛开合/宽度做归一化补偿，默认开启（`1`）
+- `EYE_DYNAMIC_ALPHA_MIN`：自适应平滑最小 alpha，默认 `0.08`
+- `EYE_DYNAMIC_ALPHA_MAX`：自适应平滑最大 alpha，默认 `0.72`
+- `EYE_JUMP_GUARD`：低置信度突跳保护阈值，默认 `0.34`
+- `EYE_MAX_STEP`：单帧最大步进限制，默认 `0.23`
 
 示例（Windows PowerShell）：
 
@@ -258,6 +289,14 @@ curl "http://127.0.0.1:3000/coordinate?format=object&debug=1"
 
 # 查看校准状态
 curl "http://127.0.0.1:3000/calibration"
+
+# 查看屏幕配置
+curl "http://127.0.0.1:3000/screen"
+
+# 更新屏幕配置
+curl -X POST "http://127.0.0.1:3000/screen" \
+  -H "Content-Type: application/json" \
+  -d "{\"width\":2560,\"height\":1440}"
 ```
 
 ---
