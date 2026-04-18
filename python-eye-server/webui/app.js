@@ -6,9 +6,10 @@ const API = {
 };
 
 const POLL_MS = 70;
-const WARMUP_MS = 280;
-const SAMPLE_MS = 850;
-const SAMPLE_INTERVAL_MS = 40;
+const SCREEN_RESYNC_MS = 2400;
+const WARMUP_MS = 320;
+const SAMPLE_MS = 1100;
+const SAMPLE_INTERVAL_MS = 35;
 
 const dom = {
   syncScreenBtn: document.getElementById("sync-screen-btn"),
@@ -26,6 +27,7 @@ const dom = {
 };
 
 let inCalibration = false;
+let viewportOrigin = { x: 0, y: 0 };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -43,17 +45,27 @@ function setStatus(message, isError = false) {
   dom.status.style.color = isError ? "#ff907f" : "#6df6ad";
 }
 
+function estimateViewportOrigin() {
+  const borderX = Math.max(0, Math.round((window.outerWidth - window.innerWidth) / 2));
+  const borderYRaw = window.outerHeight - window.innerHeight - borderX;
+  const borderY = Math.max(0, Math.round(borderYRaw));
+  return {
+    x: Math.round(window.screenX + borderX),
+    y: Math.round(window.screenY + borderY)
+  };
+}
+
 function toViewportFromScreen(screenPoint) {
   return {
-    x: screenPoint.x - window.screenX,
-    y: screenPoint.y - window.screenY
+    x: screenPoint.x - viewportOrigin.x,
+    y: screenPoint.y - viewportOrigin.y
   };
 }
 
 function screenTargetFromViewport(viewportPoint) {
   return {
-    x: window.screenX + viewportPoint.x,
-    y: window.screenY + viewportPoint.y
+    x: viewportOrigin.x + viewportPoint.x,
+    y: viewportOrigin.y + viewportPoint.y
   };
 }
 
@@ -79,16 +91,26 @@ async function fetchDebugCoordinate() {
 async function syncScreenSize() {
   const width = Number(window.screen.width);
   const height = Number(window.screen.height);
+  const estimated = estimateViewportOrigin();
   const response = await fetch(API.screen, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ width, height })
+    body: JSON.stringify({
+      width,
+      height,
+      viewport_origin_x: estimated.x,
+      viewport_origin_y: estimated.y
+    })
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload?.ok) {
     throw new Error(payload?.error || `HTTP ${response.status}`);
   }
-  dom.screenSize.textContent = `${payload.screen.width} x ${payload.screen.height}`;
+  viewportOrigin = {
+    x: Number(payload.screen.viewport_origin_x ?? estimated.x),
+    y: Number(payload.screen.viewport_origin_y ?? estimated.y)
+  };
+  dom.screenSize.textContent = `${payload.screen.width} x ${payload.screen.height} @ (${viewportOrigin.x}, ${viewportOrigin.y})`;
 }
 
 function getCalibrationTargets() {
@@ -128,11 +150,32 @@ function robustPoint(points) {
   const threshold = Math.max(20, md * 2.4);
   const filtered = points.filter((p) => Math.hypot(p.x - mx, p.y - my) <= threshold);
   if (filtered.length < 5) {
-    return { x: mx, y: my, count: points.length };
+    return { x: mx, y: my, count: points.length, spread: md };
   }
   const fx = median(filtered.map((p) => p.x));
   const fy = median(filtered.map((p) => p.y));
-  return { x: fx, y: fy, count: filtered.length };
+  const spread = median(filtered.map((p) => Math.hypot(p.x - fx, p.y - fy))) || 0;
+  return { x: fx, y: fy, count: filtered.length, spread };
+}
+
+function selectMostStableWindow(points) {
+  if (points.length < 10) return points;
+
+  const win = Math.min(18, Math.max(8, Math.floor(points.length * 0.55)));
+  let bestSlice = points;
+  let bestSpread = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i <= points.length - win; i += 1) {
+    const slice = points.slice(i, i + win);
+    const center = robustPoint(slice);
+    if (!center) continue;
+    if (center.spread < bestSpread) {
+      bestSpread = center.spread;
+      bestSlice = slice;
+    }
+  }
+
+  return bestSlice;
 }
 
 async function collectRawSamples() {
@@ -143,7 +186,7 @@ async function collectRawSamples() {
       const payload = await fetchDebugCoordinate();
       const raw = payload.coordinate_raw;
       const confidence = Number(payload.confidence || 0);
-      if (raw && Number.isFinite(raw.x) && Number.isFinite(raw.y) && confidence >= 0.55) {
+      if (raw && Number.isFinite(raw.x) && Number.isFinite(raw.y) && confidence >= 0.52) {
         points.push({ x: raw.x, y: raw.y });
       }
     } catch (_err) {
@@ -212,8 +255,9 @@ async function runCalibration() {
       setStatus(`正在采样 ${i + 1}/${targets.length}...`, false);
       await sleep(WARMUP_MS);
       const rawPoints = await collectRawSamples();
-      const robust = robustPoint(rawPoints);
-      if (!robust || robust.count < 5) {
+      const stableWindow = selectMostStableWindow(rawPoints);
+      const robust = robustPoint(stableWindow);
+      if (!robust || robust.count < 6 || robust.spread > 42) {
         throw new Error(`第 ${i + 1} 个点采样不足，请重试`);
       }
 
@@ -225,7 +269,8 @@ async function runCalibration() {
 
     const payload = await postCalibrationSamples(allSamples);
     const count = payload?.calibration?.sample_count ?? allSamples.length;
-    setStatus(`校准完成，样本数: ${count}`, false);
+    const modelType = payload?.calibration?.model_type || "unknown";
+    setStatus(`校准完成，样本数: ${count}，模型: ${modelType}`, false);
   } catch (err) {
     setStatus(`校准失败: ${err.message || String(err)}`, true);
   } finally {
@@ -244,7 +289,7 @@ async function refreshCalibrationStatus() {
     }
     const state = payload.calibration;
     dom.calibrationState.textContent = state.enabled
-      ? `已启用 (${state.sample_count || 0})`
+      ? `已启用 ${state.model_type || "-"} (${state.sample_count || 0})`
       : "未启用";
   } catch (_err) {
     // Ignore status refresh errors.
@@ -258,6 +303,13 @@ async function pollTracking() {
     const payload = await fetchDebugCoordinate();
     const raw = payload.coordinate_raw;
     const mapped = payload.coordinate_mapped || payload.coordinate;
+    if (payload?.server) {
+      const sx = Number(payload.server.viewport_origin_x);
+      const sy = Number(payload.server.viewport_origin_y);
+      if (Number.isFinite(sx) && Number.isFinite(sy)) {
+        viewportOrigin = { x: sx, y: sy };
+      }
+    }
     const viewport = clampViewport(toViewportFromScreen(mapped));
 
     dom.rawPoint.textContent = formatPoint(raw);
@@ -265,7 +317,7 @@ async function pollTracking() {
     dom.viewportPoint.textContent = formatPoint(viewport);
     dom.confidence.textContent = Number(payload.confidence || 0).toFixed(2);
     dom.calibrationState.textContent = payload?.calibration?.enabled
-      ? `已启用 (${payload?.calibration?.sample_count || 0})`
+      ? `已启用 ${payload?.calibration?.model_type || "-"} (${payload?.calibration?.sample_count || 0})`
       : "未启用";
 
     dom.gazeDot.style.left = `${Math.round(viewport.x)}px`;
@@ -311,6 +363,12 @@ async function init() {
   setInterval(() => {
     void pollTracking();
   }, POLL_MS);
+
+  setInterval(() => {
+    if (!inCalibration) {
+      void syncScreenSize().catch(() => {});
+    }
+  }, SCREEN_RESYNC_MS);
 }
 
 void init();

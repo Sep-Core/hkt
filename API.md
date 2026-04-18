@@ -104,10 +104,16 @@
   },
   "calibration": {
     "enabled": true,
+    "model_type": "quadratic",
     "applied": true,
     "updated_at_ms": 1776500000000,
     "sample_count": 5,
-    "affine": {"ax": 1.02, "bx": 0.01, "cx": -22.3, "ay": -0.02, "by": 0.98, "cy": 17.8}
+    "affine": null,
+    "quadratic": {
+      "x": [1.01, 0.02, -0.0001, 0.0, 0.0, -14.3],
+      "y": [0.01, 0.99, 0.0002, 0.0, 0.0, 11.8],
+      "basis": ["x", "y", "xy", "xx", "yy", "1"]
+    }
   },
   "server": {
     "host": "127.0.0.1",
@@ -115,6 +121,8 @@
     "endpoint": "/coordinate",
     "coord_width": 1920,
     "coord_height": 1080,
+    "viewport_origin_x": 120,
+    "viewport_origin_y": 88,
     "flip_x": true,
     "default_format": "object"
   },
@@ -148,9 +156,15 @@
   "ok": true,
   "calibration": {
     "enabled": true,
+    "model_type": "quadratic",
     "updated_at_ms": 1776500000000,
     "sample_count": 5,
-    "affine": {"ax": 1.02, "bx": 0.01, "cx": -22.3, "ay": -0.02, "by": 0.98, "cy": 17.8}
+    "affine": null,
+    "quadratic": {
+      "x": [1.01, 0.02, -0.0001, 0.0, 0.0, -14.3],
+      "y": [0.01, 0.99, 0.0002, 0.0, 0.0, 11.8],
+      "basis": ["x", "y", "xy", "xx", "yy", "1"]
+    }
   }
 }
 ```
@@ -202,6 +216,8 @@
   "screen": {
     "width": 2560,
     "height": 1440,
+    "viewport_origin_x": 120,
+    "viewport_origin_y": 88,
     "updated_at_ms": 1776500000000
   }
 }
@@ -214,7 +230,9 @@
 ```json
 {
   "width": 2560,
-  "height": 1440
+  "height": 1440,
+  "viewport_origin_x": 120,
+  "viewport_origin_y": 88
 }
 ```
 
@@ -235,6 +253,10 @@
 - `EYE_X_SMOOTHING`：X 轴平滑系数，默认 `0.25`
 - `EYE_Y_SMOOTHING`：Y 轴平滑系数，默认 `0.35`
 - `EYE_SIZE_COMPENSATION`：按眼睛开合/宽度做归一化补偿，默认开启（`1`）
+- `EYE_DYNAMIC_ALPHA_MIN`：自适应平滑最小 alpha，默认 `0.08`
+- `EYE_DYNAMIC_ALPHA_MAX`：自适应平滑最大 alpha，默认 `0.72`
+- `EYE_JUMP_GUARD`：低置信度突跳保护阈值，默认 `0.34`
+- `EYE_MAX_STEP`：单帧最大步进限制，默认 `0.23`
 
 示例（Windows PowerShell）：
 
