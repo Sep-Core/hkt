@@ -14,11 +14,11 @@ let debugBox = null;
 let statusTag = null;
 let debugPanel = null;
 let pollTimer = null;
-let lastMouseViewport = null;
-let latestRawViewportCoord = null;
-let calibration = null;
-let calibrationInProgress = false;
 let calibrationTarget = null;
+let calibrationInProgress = false;
+let lastMouseViewport = null;
+let backendCalibrationEnabled = false;
+
 let debugState = {
   source: "init",
   rawApiCoord: null,
@@ -27,6 +27,15 @@ let debugState = {
   fallback: "none",
   latencyMs: null
 };
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fmtCoord(coord) {
+  if (!coord) return "-";
+  return `${Math.round(coord.x)}, ${Math.round(coord.y)}`;
+}
 
 function ensureOverlay() {
   if (overlay && document.contains(overlay)) return;
@@ -45,7 +54,6 @@ function ensureOverlay() {
   overlay.style.webkitBackdropFilter = "brightness(0.9) contrast(0.92) saturate(0.88)";
 
   debugBox = document.createElement("div");
-  debugBox.id = "__shrimp_debug_box";
   debugBox.style.position = "fixed";
   debugBox.style.left = "0";
   debugBox.style.top = "0";
@@ -74,7 +82,6 @@ function ensureOverlay() {
   statusTag.textContent = "Shrimp: ready";
 
   debugPanel = document.createElement("pre");
-  debugPanel.id = "__shrimp_debug_panel";
   debugPanel.style.position = "fixed";
   debugPanel.style.right = "12px";
   debugPanel.style.bottom = "12px";
@@ -88,7 +95,6 @@ function ensureOverlay() {
   debugPanel.style.pointerEvents = "none";
   debugPanel.style.zIndex = "2147483647";
   debugPanel.style.display = settings.showDebugPanel ? "block" : "none";
-  debugPanel.textContent = "Shrimp debug panel";
 
   document.documentElement.appendChild(overlay);
   document.documentElement.appendChild(debugBox);
@@ -101,14 +107,8 @@ function setStatus(text) {
   statusTag.textContent = text;
 }
 
-function fmtCoord(coord) {
-  if (!coord) return "-";
-  return `${Math.round(coord.x)}, ${Math.round(coord.y)}`;
-}
-
 function updateDebugPanel() {
   ensureOverlay();
-  if (!debugPanel) return;
   debugPanel.style.display = settings.showDebugPanel ? "block" : "none";
   if (!settings.showDebugPanel) return;
   debugPanel.textContent =
@@ -121,11 +121,7 @@ function updateDebugPanel() {
     `raw API: ${fmtCoord(debugState.rawApiCoord)}\n` +
     `viewport: ${fmtCoord(debugState.viewportCoord)}\n` +
     `mapped: ${fmtCoord(debugState.mappedCoord)}\n` +
-    `calibration: ${calibration?.enabled ? "on" : "off"}`;
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+    `calibration(backend): ${backendCalibrationEnabled ? "on" : "off"}`;
 }
 
 function applySpotlight(x, y) {
@@ -133,7 +129,6 @@ function applySpotlight(x, y) {
   const radius = Math.max(60, Number(settings.spotlightRadius) || 180);
   const cx = Math.max(0, Math.min(window.innerWidth, x));
   const cy = Math.max(0, Math.min(window.innerHeight, y));
-
   overlay.style.webkitMaskImage = `radial-gradient(circle ${radius}px at ${cx}px ${cy}px, transparent 0 ${radius}px, black ${radius + 1}px)`;
   overlay.style.maskImage = `radial-gradient(circle ${radius}px at ${cx}px ${cy}px, transparent 0 ${radius}px, black ${radius + 1}px)`;
 
@@ -147,36 +142,20 @@ function applySpotlight(x, y) {
   updateDebugPanel();
 }
 
-function applyCalibration(coord) {
-  if (!calibration?.enabled || !calibration?.affine) return coord;
-  const a = calibration.affine;
-  return {
-    x: a.ax * coord.x + a.bx * coord.y + a.cx,
-    y: a.ay * coord.x + a.by * coord.y + a.cy
-  };
-}
-
 function parseCoordinateFromText(text) {
   const match = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/.exec(text);
   if (!match) return null;
   return { x: Number(match[1]), y: Number(match[2]) };
 }
 
-function parseCoordinate(payload) {
-  if (Array.isArray(payload) && payload.length >= 2) {
-    return { x: Number(payload[0]), y: Number(payload[1]) };
+function parseCoordObject(payload) {
+  if (Array.isArray(payload) && payload.length >= 2) return { x: Number(payload[0]), y: Number(payload[1]) };
+  if (!payload || typeof payload !== "object") return null;
+  if (payload.coordinate && typeof payload.coordinate.x === "number" && typeof payload.coordinate.y === "number") {
+    return { x: payload.coordinate.x, y: payload.coordinate.y };
   }
-  if (payload && typeof payload === "object") {
-    if (
-      payload.coordinate &&
-      typeof payload.coordinate.x === "number" &&
-      typeof payload.coordinate.y === "number"
-    ) {
-      return { x: payload.coordinate.x, y: payload.coordinate.y };
-    }
-    if (typeof payload.x === "number" && typeof payload.y === "number") {
-      return { x: payload.x, y: payload.y };
-    }
+  if (typeof payload.x === "number" && typeof payload.y === "number") {
+    return { x: payload.x, y: payload.y };
   }
   return null;
 }
@@ -184,10 +163,7 @@ function parseCoordinate(payload) {
 function toViewportCoordinate(coord) {
   const basis = settings.coordinateBasis;
   if (basis === "viewport") return coord;
-  if (basis === "document") {
-    return { x: coord.x - window.scrollX, y: coord.y - window.scrollY };
-  }
-
+  if (basis === "document") return { x: coord.x - window.scrollX, y: coord.y - window.scrollY };
   const viewTry = { x: coord.x, y: coord.y };
   if (
     viewTry.x >= -40 &&
@@ -205,100 +181,49 @@ function fallbackFocusPoint() {
   return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
 }
 
+function buildControlUrl(pathname) {
+  const parsed = new URL(settings.apiUrl);
+  parsed.search = "";
+  parsed.hash = "";
+  parsed.pathname = pathname;
+  return parsed.toString();
+}
+
 async function fetchApiCoordinateRaw() {
   const startedAt = performance.now();
   const response = await fetch(settings.apiUrl, { cache: "no-store" });
   const text = await response.text();
 
-  let coord = null;
+  let payload = null;
+  let mappedCoord = null;
+  let rawCoord = null;
+
   try {
-    const jsonPayload = JSON.parse(text);
-    coord = parseCoordinate(jsonPayload);
+    payload = JSON.parse(text);
+    mappedCoord = parseCoordObject(payload);
+    if (payload?.coordinate_raw) rawCoord = parseCoordObject(payload.coordinate_raw);
+    if (!rawCoord) rawCoord = mappedCoord;
+    if (typeof payload?.calibration?.enabled === "boolean") {
+      backendCalibrationEnabled = payload.calibration.enabled;
+    }
   } catch (_err) {
-    coord = parseCoordinateFromText(text);
+    mappedCoord = parseCoordinateFromText(text);
+    rawCoord = mappedCoord;
   }
 
-  if (!coord || !Number.isFinite(coord.x) || !Number.isFinite(coord.y)) {
-    return {
-      ok: false,
-      latencyMs: Math.round(performance.now() - startedAt),
-      error: "invalid-coordinate"
-    };
+  if (!mappedCoord || !Number.isFinite(mappedCoord.x) || !Number.isFinite(mappedCoord.y)) {
+    return { ok: false, latencyMs: Math.round(performance.now() - startedAt), error: "invalid-coordinate" };
   }
 
-  const viewportRaw = toViewportCoordinate(coord);
+  const mappedViewport = toViewportCoordinate(mappedCoord);
+  const rawViewport = rawCoord ? toViewportCoordinate(rawCoord) : mappedViewport;
   return {
     ok: true,
-    rawApiCoord: coord,
-    viewportRaw,
+    rawApiCoord: rawCoord,
+    mappedApiCoord: mappedCoord,
+    rawViewport,
+    mappedViewport,
     latencyMs: Math.round(performance.now() - startedAt)
-  };
-}
-
-function solve3x3(matrix, vector) {
-  const a = [
-    [matrix[0][0], matrix[0][1], matrix[0][2], vector[0]],
-    [matrix[1][0], matrix[1][1], matrix[1][2], vector[1]],
-    [matrix[2][0], matrix[2][1], matrix[2][2], vector[2]]
-  ];
-
-  for (let col = 0; col < 3; col += 1) {
-    let pivot = col;
-    for (let row = col + 1; row < 3; row += 1) {
-      if (Math.abs(a[row][col]) > Math.abs(a[pivot][col])) pivot = row;
-    }
-    if (Math.abs(a[pivot][col]) < 1e-8) return null;
-    if (pivot !== col) {
-      const tmp = a[col];
-      a[col] = a[pivot];
-      a[pivot] = tmp;
-    }
-    const base = a[col][col];
-    for (let j = col; j < 4; j += 1) a[col][j] /= base;
-    for (let row = 0; row < 3; row += 1) {
-      if (row === col) continue;
-      const factor = a[row][col];
-      for (let j = col; j < 4; j += 1) {
-        a[row][j] -= factor * a[col][j];
-      }
-    }
-  }
-  return [a[0][3], a[1][3], a[2][3]];
-}
-
-function fitAffine(pairs) {
-  if (!pairs || pairs.length < 3) return null;
-
-  const ata = [
-    [0, 0, 0],
-    [0, 0, 0],
-    [0, 0, 0]
-  ];
-  const atbx = [0, 0, 0];
-  const atby = [0, 0, 0];
-
-  for (const p of pairs) {
-    const row = [p.raw.x, p.raw.y, 1];
-    for (let i = 0; i < 3; i += 1) {
-      for (let j = 0; j < 3; j += 1) {
-        ata[i][j] += row[i] * row[j];
-      }
-      atbx[i] += row[i] * p.target.x;
-      atby[i] += row[i] * p.target.y;
-    }
-  }
-
-  const xCoeffs = solve3x3(ata, atbx);
-  const yCoeffs = solve3x3(ata, atby);
-  if (!xCoeffs || !yCoeffs) return null;
-
-  return {
-    ax: xCoeffs[0],
-    bx: xCoeffs[1],
-    cx: xCoeffs[2],
-    ay: yCoeffs[0],
-    by: yCoeffs[1],
-    cy: yCoeffs[2]
   };
 }
 
@@ -338,8 +263,6 @@ function ensureCalibrationTarget() {
   calibrationTarget.style.top = "0";
   calibrationTarget.style.transform = "translate(-50%, -50%)";
   calibrationTarget.style.display = "none";
-  calibrationTarget.style.margin = "0";
-  calibrationTarget.style.padding = "0";
   document.documentElement.appendChild(calibrationTarget);
 }
 
@@ -351,90 +274,88 @@ function moveCalibrationTarget(point) {
 }
 
 function hideCalibrationTarget() {
-  if (calibrationTarget) {
-    calibrationTarget.style.display = "none";
-  }
+  if (calibrationTarget) calibrationTarget.style.display = "none";
 }
 
 async function collectSamples(durationMs = 900) {
   const samples = [];
   const started = Date.now();
   while (Date.now() - started < durationMs) {
-    if (settings.apiUrl) {
-      try {
-        const result = await fetchApiCoordinateRaw();
-        if (result.ok) {
-          latestRawViewportCoord = result.viewportRaw;
-          samples.push({ ...result.viewportRaw });
-          debugState = {
-            ...debugState,
-            source: "calibration",
-            fallback: "none",
-            rawApiCoord: result.rawApiCoord,
-            viewportCoord: result.viewportRaw,
-            latencyMs: result.latencyMs
-          };
-          updateDebugPanel();
-        }
-      } catch (_err) {
-        // Ignore occasional request failures during calibration sampling.
+    try {
+      const result = await fetchApiCoordinateRaw();
+      if (result.ok && result.rawViewport) {
+        samples.push({ ...result.rawViewport });
+        debugState = {
+          ...debugState,
+          source: "calibration",
+          fallback: "none",
+          rawApiCoord: result.rawApiCoord,
+          viewportCoord: result.rawViewport,
+          latencyMs: result.latencyMs
+        };
+        updateDebugPanel();
       }
-    } else if (latestRawViewportCoord) {
-      samples.push({ ...latestRawViewportCoord });
+    } catch (_err) {
+      // ignore transient errors
     }
     await sleep(45);
   }
   if (samples.length < 6) return null;
-  const avg = samples.reduce(
-    (acc, s) => ({ x: acc.x + s.x, y: acc.y + s.y }),
-    { x: 0, y: 0 }
-  );
-  return { x: avg.x / samples.length, y: avg.y / samples.length };
+  const total = samples.reduce((acc, cur) => ({ x: acc.x + cur.x, y: acc.y + cur.y }), { x: 0, y: 0 });
+  return { x: total.x / samples.length, y: total.y / samples.length };
+}
+
+async function submitCalibrationSamples(samples) {
+  const url = buildControlUrl("/calibration");
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ samples })
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || !body?.ok) {
+    throw new Error(body?.error || `HTTP ${response.status}`);
+  }
+  backendCalibrationEnabled = Boolean(body?.calibration?.enabled);
+}
+
+async function resetCalibrationRemote() {
+  const url = buildControlUrl("/calibration/reset");
+  const response = await fetch(url, { method: "POST" });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || !body?.ok) {
+    throw new Error(body?.error || `HTTP ${response.status}`);
+  }
+  backendCalibrationEnabled = false;
 }
 
 async function runCalibration() {
   if (calibrationInProgress) return { ok: false, error: "Calibration already running." };
   calibrationInProgress = true;
-
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
 
   try {
     const targets = getCalibrationTargets();
     const pairs = [];
-
     setStatus("Shrimp: calibration start");
     await sleep(400);
-
     for (let i = 0; i < targets.length; i += 1) {
-      const t = targets[i];
-      moveCalibrationTarget(t);
-      applySpotlight(t.x, t.y);
+      const target = targets[i];
+      moveCalibrationTarget(target);
+      applySpotlight(target.x, target.y);
       setStatus(`Calibrating ${i + 1}/${targets.length}: stare at blue dot`);
-      debugState.source = "calibration";
-      debugState.fallback = "none";
-      debugState.mappedCoord = { ...t };
-      updateDebugPanel();
       await sleep(500);
       const raw = await collectSamples(900);
-      if (!raw) {
-        setStatus("Calibration failed: no gaze samples.");
-        return { ok: false, error: "No gaze samples from API." };
-      }
-      pairs.push({ raw, target: t });
+      if (!raw) return { ok: false, error: "No gaze samples from API." };
+      pairs.push({ raw, target });
     }
-
-    hideCalibrationTarget();
-    const affine = fitAffine(pairs);
-    if (!affine) {
-      setStatus("Calibration failed: cannot fit mapping.");
-      return { ok: false, error: "Calibration matrix solve failed." };
-    }
-
-    calibration = { enabled: true, affine, updatedAt: Date.now() };
-    chrome.storage.local.set({ calibration });
-    setStatus("Shrimp: calibration saved");
+    await submitCalibrationSamples(pairs);
+    setStatus("Shrimp: calibration saved (backend)");
     return { ok: true };
+  } catch (err) {
+    setStatus("Calibration failed");
+    return { ok: false, error: err?.message || "calibration failed" };
   } finally {
     hideCalibrationTarget();
     calibrationInProgress = false;
@@ -442,24 +363,10 @@ async function runCalibration() {
   }
 }
 
-function resetCalibration() {
-  calibration = null;
-  chrome.storage.local.remove("calibration");
-  setStatus("Shrimp: calibration reset");
-  updateDebugPanel();
-}
-
 async function fetchCoordinate() {
   if (!settings.apiUrl) {
     setStatus("Shrimp: set API URL in popup");
-    debugState = {
-      ...debugState,
-      source: "config",
-      fallback: "center-no-url",
-      rawApiCoord: null,
-      viewportCoord: null,
-      latencyMs: null
-    };
+    debugState = { ...debugState, source: "config", fallback: "center-no-url", rawApiCoord: null, viewportCoord: null, latencyMs: null };
     applySpotlight(window.innerWidth / 2, window.innerHeight / 2);
     return;
   }
@@ -481,19 +388,16 @@ async function fetchCoordinate() {
       return;
     }
 
-    const viewportRaw = result.viewportRaw;
-    latestRawViewportCoord = viewportRaw;
-    const viewportCoord = applyCalibration(viewportRaw);
     debugState = {
       ...debugState,
       source: "api",
       fallback: "none",
       rawApiCoord: result.rawApiCoord,
-      viewportCoord: viewportRaw,
+      viewportCoord: result.rawViewport,
       latencyMs: result.latencyMs
     };
-    applySpotlight(viewportCoord.x, viewportCoord.y);
-    setStatus(calibration?.enabled ? "Shrimp: tracking (calibrated)" : "Shrimp: tracking");
+    applySpotlight(result.mappedViewport.x, result.mappedViewport.y);
+    setStatus(backendCalibrationEnabled ? "Shrimp: tracking (backend calibrated)" : "Shrimp: tracking");
   } catch (_err) {
     const fallback = fallbackFocusPoint();
     setStatus("Shrimp: request failed, fallback");
@@ -512,19 +416,14 @@ async function fetchCoordinate() {
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   const interval = Math.max(30, Number(settings.pollMs) || 80);
-  pollTimer = setInterval(() => {
-    void fetchCoordinate();
-  }, interval);
+  pollTimer = setInterval(() => void fetchCoordinate(), interval);
   void fetchCoordinate();
 }
 
 function loadSettingsAndStart() {
-  chrome.storage.local.get({ ...SETTINGS_DEFAULTS, calibration: null }, (stored) => {
+  chrome.storage.local.get(SETTINGS_DEFAULTS, (stored) => {
     settings = { ...SETTINGS_DEFAULTS, ...stored };
-    calibration = stored.calibration;
-    if (debugBox) {
-      debugBox.style.display = settings.showDebugBox ? "block" : "none";
-    }
+    if (debugBox) debugBox.style.display = settings.showDebugBox ? "block" : "none";
     updateDebugPanel();
     startPolling();
   });
@@ -538,11 +437,6 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   let changed = false;
   for (const [key, value] of Object.entries(changes)) {
-    if (key === "calibration") {
-      calibration = value.newValue ?? null;
-      changed = true;
-      continue;
-    }
     if (key in settings) {
       settings[key] = value.newValue;
       changed = true;
@@ -558,8 +452,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "shrimp_reset_calibration") {
-    resetCalibration();
-    sendResponse({ ok: true });
+    void resetCalibrationRemote()
+      .then(() => {
+        setStatus("Shrimp: calibration reset (backend)");
+        updateDebugPanel();
+        sendResponse({ ok: true });
+      })
+      .catch((err) => sendResponse({ ok: false, error: err?.message || "reset failed" }));
     return true;
   }
   return false;

@@ -7,6 +7,9 @@
 - 默认：`http://127.0.0.1:3000`
 - 坐标接口：`GET /coordinate`
 - 健康检查：`GET /health`
+- 校准状态：`GET /calibration`
+- 提交校准：`POST /calibration`
+- 重置校准：`POST /calibration/reset`
 
 ---
 
@@ -41,7 +44,7 @@
 {"x": 320, "y": 240}
 ```
 
-### 基础兼容响应格式
+### 基础兼容响应格式（返回后端映射后的坐标）
 
 1. `object`
 
@@ -68,6 +71,7 @@
 ```
 
 > 说明：当前后端输出的是像素坐标（基于 `EYE_COORD_WIDTH` / `EYE_COORD_HEIGHT` 映射）。
+> 当后端校准启用时，这里返回的是 **mapped 坐标**（不是原始 raw 坐标）。
 
 ### 全量调试响应（推荐联调用）
 
@@ -86,12 +90,21 @@
   "ok": true,
   "coordinate": {"x": 962, "y": 541},
   "coordinate_norm": {"x": 0.501, "y": 0.501},
+  "coordinate_raw": {"x": 901, "y": 520},
+  "coordinate_mapped": {"x": 962, "y": 541},
   "confidence": 1.0,
   "tracking": {
     "backend": "tasks",
     "sequence": 1267,
     "last_update_ms": 1776500000000,
     "age_ms": 24
+  },
+  "calibration": {
+    "enabled": true,
+    "applied": true,
+    "updated_at_ms": 1776500000000,
+    "sample_count": 5,
+    "affine": {"ax": 1.02, "bx": 0.01, "cx": -22.3, "ay": -0.02, "by": 0.98, "cy": 17.8}
   },
   "server": {
     "host": "127.0.0.1",
@@ -117,11 +130,62 @@
 }
 ```
 
-这意味着前后端沟通里的关键数据（坐标、置信度、后端状态、请求参数回显、格式兼容结果）都能直接通过 API 拿到。
+这意味着前后端沟通里的关键数据（raw/mapped 坐标、置信度、校准状态、请求回显、格式兼容结果）都能直接通过 API 拿到。
 
 ---
 
-## 3) 调试面板字段（前端插件显示）
+## 3) 校准 API（后端映射）
+
+### 获取当前校准状态
+
+`GET /calibration`
+
+```json
+{
+  "ok": true,
+  "calibration": {
+    "enabled": true,
+    "updated_at_ms": 1776500000000,
+    "sample_count": 5,
+    "affine": {"ax": 1.02, "bx": 0.01, "cx": -22.3, "ay": -0.02, "by": 0.98, "cy": 17.8}
+  }
+}
+```
+
+### 提交样本由后端拟合
+
+`POST /calibration`
+
+```json
+{
+  "samples": [
+    {"raw": {"x": 450, "y": 260}, "target": {"x": 290, "y": 160}},
+    {"raw": {"x": 1490, "y": 260}, "target": {"x": 1630, "y": 160}},
+    {"raw": {"x": 960, "y": 540}, "target": {"x": 960, "y": 540}}
+  ]
+}
+```
+
+后端会计算仿射矩阵并在后续 `/coordinate` 中应用映射。
+
+### 直接提交仿射矩阵
+
+`POST /calibration`
+
+```json
+{
+  "affine": {"ax": 1, "bx": 0, "cx": 0, "ay": 0, "by": 1, "cy": 0},
+  "sample_count": 0
+}
+```
+
+### 重置校准
+
+`POST /calibration/reset`
+
+---
+
+## 4) 调试面板字段（前端插件显示）
 
 页面右下角 debug panel 中主要字段：
 
@@ -143,13 +207,13 @@
 - `viewport`
   - 按 `basis` 换算到当前视口后的坐标
 - `mapped`
-  - 经过校准映射后的最终坐标（高亮实际使用）
-- `calibration`
-  - `on|off`（是否启用校准参数）
+  - 后端返回的映射后坐标（高亮实际使用）
+- `calibration(backend)`
+  - 后端校准是否启用
 
 ---
 
-## 4) 常用环境变量（后端）
+## 5) 常用环境变量（后端）
 
 - `EYE_SERVER_HOST`：服务地址，默认 `127.0.0.1`
 - `EYE_SERVER_PORT`：服务端口，默认 `3000`
@@ -170,7 +234,7 @@ python python-eye-server/eye_server.py
 
 ---
 
-## 5) 快速联调示例
+## 6) 快速联调示例
 
 ```powershell
 # 健康检查
@@ -187,4 +251,7 @@ curl "http://127.0.0.1:3000/coordinate?format=debug"
 
 # 基础格式 + 调试信息
 curl "http://127.0.0.1:3000/coordinate?format=object&debug=1"
+
+# 查看校准状态
+curl "http://127.0.0.1:3000/calibration"
 ```
